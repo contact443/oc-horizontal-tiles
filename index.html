@@ -2624,18 +2624,90 @@
         if (!m) return 0;
         return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
       }
+      /* Per-extension call state. Each of the user's two extensions owns its
+         own ongoing/on-hold list — there is no overlap. We achieve this by
+         snapshotting the dial-card SVG's innerHTML on every line switch:
+         the outgoing line's state is captured, the incoming line's state is
+         restored. Event listeners use document-level delegation, so swapping
+         innerHTML doesn't break them; live timers are driven by absolute
+         data-call-start-ms timestamps, so the global ticker picks them up
+         again on the next tick. */
+      const lineCallSnapshots = { teamhub: null, hardphone: null };
+      let __activeLineKey = null;
+      let __lineCallStateInitialized = false;
+
+      function __captureLineHostSnapshot() {
+        const svg = document.querySelector("#dialCallCardsHost svg");
+        return svg ? svg.innerHTML : null;
+      }
+
+      function __applyLineHostSnapshot(html) {
+        if (html == null) return;
+        const svg = document.querySelector("#dialCallCardsHost svg");
+        if (!svg) return;
+        svg.innerHTML = html;
+        if (typeof window.__syncEmptyStateLabels === "function") {
+          window.__syncEmptyStateLabels();
+        }
+        if (typeof tickPrototypeTimers === "function") tickPrototypeTimers();
+      }
+
+      function __buildEmptyLineHostSnapshot() {
+        const svg = document.querySelector("#dialCallCardsHost svg");
+        if (!svg) return null;
+        const clone = svg.cloneNode(true);
+        // Hide every call slot so the dial pad starts on the empty state.
+        // existingHoldCards (the on-hold container) is hidden too — that's
+        // what __syncEmptyStateLabels keys off to declare holdEmpty=true.
+        // __addToUserHoldQueue re-shows the container the moment a hold
+        // call appears, so it's safe to start hidden.
+        ["topCallCard", "incomingCallCard", "answeredHoldCard",
+         "card1Wrapper", "card2Wrapper", "card3Wrapper",
+         "existingHoldCards"].forEach(function (id) {
+          const el = clone.querySelector("#" + id);
+          if (el) el.style.display = "none";
+        });
+        clone.querySelectorAll(".dynamic-hold-wrapper").forEach(function (el) {
+          el.remove();
+        });
+        return clone.innerHTML;
+      }
+
       function syncDialCallCardsVisibility() {
         const host = document.getElementById("dialCallCardsHost");
         const empty = document.getElementById("dialCallCardsEmpty");
-        if (!host || !empty) return;
-        const selected = document.querySelector(
+        // The dial-pad SVG always carries its own "No active calls" empty
+        // state via __syncEmptyStateLabels, so we keep the host visible at
+        // all times and retire the external placeholder.
+        if (host) {
+          host.classList.remove("hidden");
+          host.setAttribute("aria-hidden", "false");
+        }
+        if (empty) {
+          empty.classList.add("hidden");
+          empty.setAttribute("aria-hidden", "true");
+        }
+        const selectedOpt = document.querySelector(
           '#lineSelectorMenu [role="option"][aria-selected="true"]'
         );
-        const show = selected?.getAttribute("data-line") === "hardphone";
-        host.classList.toggle("hidden", !show);
-        host.setAttribute("aria-hidden", show ? "false" : "true");
-        empty.classList.toggle("hidden", show);
-        empty.setAttribute("aria-hidden", show ? "true" : "false");
+        const newLineKey =
+          (selectedOpt && selectedOpt.getAttribute("data-line")) || "teamhub";
+        if (!__lineCallStateInitialized) {
+          __lineCallStateInitialized = true;
+          // The page ships with the DeskPhone (hardphone) extension's calls
+          // hardcoded into the SVG — snapshot that as hardphone's initial
+          // state, then build an empty state for the other extension.
+          lineCallSnapshots.hardphone = __captureLineHostSnapshot();
+          lineCallSnapshots.teamhub = __buildEmptyLineHostSnapshot();
+          __activeLineKey = newLineKey;
+          __applyLineHostSnapshot(lineCallSnapshots[__activeLineKey]);
+          return;
+        }
+        if (newLineKey === __activeLineKey) return;
+        // Save current live DOM into the outgoing line and restore the new one.
+        lineCallSnapshots[__activeLineKey] = __captureLineHostSnapshot();
+        __activeLineKey = newLineKey;
+        __applyLineHostSnapshot(lineCallSnapshots[newLineKey]);
       }
       window.showDialCallCards = function () {
         document.querySelector('#lineSelectorMenu [data-line="hardphone"]')?.click();
